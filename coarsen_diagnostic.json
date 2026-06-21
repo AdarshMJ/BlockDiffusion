@@ -1,0 +1,195 @@
+{
+  "args": {
+    "n_graphs": 50,
+    "n_nodes": 500,
+    "r_list": "0.5,0.8,0.9,0.95",
+    "K": 100,
+    "laplacian_kind": "normalized_self_loop",
+    "method": "edges",
+    "from_pickle": null,
+    "seed": 0,
+    "out": "coarsen_diagnostic.json"
+  },
+  "results": [
+    {
+      "r_requested": 0.5,
+      "r_actual_mean": 0.5,
+      "n_stalled": 0,
+      "n_c": {
+        "mean": 250.0,
+        "min": 250.0,
+        "max": 250.0
+      },
+      "E_c": {
+        "mean": 731.92,
+        "min": 727.0,
+        "max": 736.0
+      },
+      "cluster_size_v": {
+        "n": 12500,
+        "mean": 2.0,
+        "std": 1.0728653223960591,
+        "min": 1.0,
+        "max": 7.0,
+        "p50": 2.0,
+        "p90": 3.0,
+        "p95": 4.0,
+        "p99": 5.0,
+        "p100": 7.0
+      },
+      "super_edge_weight": {
+        "n": 36596,
+        "mean": 1.520220789157285,
+        "std": 0.7326160834429605,
+        "min": 1.0,
+        "max": 6.0,
+        "p50": 1.0,
+        "p90": 3.0,
+        "p95": 3.0,
+        "p99": 4.0,
+        "p100": 6.0
+      },
+      "weight_frac_eq1": 0.6079899442562029,
+      "weight_frac_le2": 0.8866269537654389,
+      "coarsen_time_s_mean": 0.4002138768765144,
+      "suggested_K": 4,
+      "intra_problems_per_graph": 250.0,
+      "inter_problems_per_graph": 731.92
+    },
+    {
+      "r_requested": 0.8,
+      "r_actual_mean": 0.8019999999999999,
+      "n_stalled": 0,
+      "n_c": {
+        "mean": 99.0,
+        "min": 99.0,
+        "max": 99.0
+      },
+      "E_c": {
+        "mean": 281.58,
+        "min": 277.0,
+        "max": 286.0
+      },
+      "cluster_size_v": {
+        "n": 4950,
+        "mean": 5.05050505050505,
+        "std": 1.5052348880345254,
+        "min": 1.0,
+        "max": 12.0,
+        "p50": 5.0,
+        "p90": 7.0,
+        "p95": 8.0,
+        "p99": 9.0,
+        "p100": 12.0
+      },
+      "super_edge_weight": {
+        "n": 14079,
+        "mean": 2.573620285531643,
+        "std": 1.3322170883471498,
+        "min": 1.0,
+        "max": 7.0,
+        "p50": 2.0,
+        "p90": 4.0,
+        "p95": 5.0,
+        "p99": 6.0,
+        "p100": 7.0
+      },
+      "weight_frac_eq1": 0.27125506072874495,
+      "weight_frac_le2": 0.5116130406989132,
+      "coarsen_time_s_mean": 0.4484432161785662,
+      "suggested_K": 6,
+      "intra_problems_per_graph": 99.0,
+      "inter_problems_per_graph": 281.58
+    },
+    {
+      "r_requested": 0.9,
+      "r_actual_mean": 0.9,
+      "n_stalled": 0,
+      "n_c": {
+        "mean": 50.0,
+        "min": 50.0,
+        "max": 50.0
+      },
+      "E_c": {
+        "mean": 136.8,
+        "min": 134.0,
+        "max": 140.0
+      },
+      "cluster_size_v": {
+        "n": 2500,
+        "mean": 10.0,
+        "std": 4.466049708635138,
+        "min": 2.0,
+        "max": 36.0,
+        "p50": 9.0,
+        "p90": 16.0,
+        "p95": 19.0,
+        "p99": 25.0,
+        "p100": 36.0
+      },
+      "super_edge_weight": {
+        "n": 6840,
+        "mean": 3.6804093567251464,
+        "std": 2.138732711257966,
+        "min": 1.0,
+        "max": 13.0,
+        "p50": 3.0,
+        "p90": 7.0,
+        "p95": 8.0,
+        "p99": 9.0,
+        "p100": 13.0
+      },
+      "weight_frac_eq1": 0.18026315789473685,
+      "weight_frac_le2": 0.3454678362573099,
+      "coarsen_time_s_mean": 0.4587985593569465,
+      "suggested_K": 9,
+      "intra_problems_per_graph": 50.0,
+      "inter_problems_per_graph": 136.8
+    },
+    {
+      "r_requested": 0.95,
+      "r_actual_mean": 0.9480000000000001,
+      "n_stalled": 0,
+      "n_c": {
+        "mean": 26.0,
+        "min": 26.0,
+        "max": 26.0
+      },
+      "E_c": {
+        "mean": 66.7,
+        "min": 64.0,
+        "max": 69.0
+      },
+      "cluster_size_v": {
+        "n": 1300,
+        "mean": 19.23076923076923,
+        "std": 9.198777896704508,
+        "min": 4.0,
+        "max": 65.0,
+        "p50": 17.0,
+        "p90": 32.0,
+        "p95": 39.0,
+        "p99": 48.0,
+        "p100": 65.0
+      },
+      "super_edge_weight": {
+        "n": 3335,
+        "mean": 5.199100449775113,
+        "std": 3.129671191917777,
+        "min": 1.0,
+        "max": 16.0,
+        "p50": 5.0,
+        "p90": 10.0,
+        "p95": 11.0,
+        "p99": 13.0,
+        "p100": 16.0
+      },
+      "weight_frac_eq1": 0.12443778110944528,
+      "weight_frac_le2": 0.23238380809595202,
+      "coarsen_time_s_mean": 0.5212883944716304,
+      "suggested_K": 13,
+      "intra_problems_per_graph": 26.0,
+      "inter_problems_per_graph": 66.7
+    }
+  ]
+}

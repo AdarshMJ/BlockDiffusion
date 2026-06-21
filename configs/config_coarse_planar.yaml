@@ -1,0 +1,73 @@
+# Single config for the coarsen + DiGress latent-diffusion pipeline (Stage B).
+#
+# One command does everything (coarsens lazily on first run, then trains):
+#   python main.py --config configs/config_coarse_planar.yaml --mode train --device cuda
+#
+# The planar dataset must already exist at coarsening.planar_dir (produced once by
+#   python -m datasets.generate_planar --n-train 5000 --n-val 500 --n-test 500 \
+#       --n-nodes 500 --out data/planar500).
+#
+# Coarse graphs: ~50 supernodes; edges carry de=11 bucketed weight classes
+# (0=no-edge, 1..9 exact weight, 10=>=10). Node type is constant (dx=1).
+
+general:
+  name: 'coarse_planar'
+  seed: 42
+  check_val_every_n_epochs: 5
+  sample_every_val: 20          # sample every 20 epochs during training
+  number_chain_steps: 1
+  samples_to_generate: 32
+  chains_to_save: 0             # no diffusion-chain visualization (faster)
+  final_model_samples_to_generate: 100
+  final_model_samples_to_save: 10
+
+dataset:
+  name: 'coarse_planar'
+  num_train_graphs: 5           # only used for #ground-truth graphs to visualize
+  pin_memory: false
+
+# ---- Stage A: coarsening params (planar graphs -> G_c). Cached by these params.
+coarsening:
+  planar_dir: 'data/planar500'      # input: planar nx pickles (already generated)
+  cache_dir: 'data/coarse_planar'   # output cache root; subdir keyed by params
+  r: 0.9                            # reduction ratio (fallback 0.8 if intra struggles)
+  K: 100                            # #preserved eigenvectors (Loukas)
+  laplacian_kind: 'normalized_self_loop'
+  method: 'edges'                   # 'edges' | 'neighborhood'
+  force_rebuild: false              # set true to ignore cache and recoarsen
+
+# ---- Stage B: DiGress on G_c
+model:
+  n_layers: 5
+  hidden_dims:
+    dx: 256
+    de: 64
+    dy: 64
+    n_head: 8
+    dim_ffX: 256
+    dim_ffE: 64
+    dim_ffY: 256
+  hidden_mlp_dims:
+    X: 256
+    E: 128
+    y: 128
+
+  diffusion_steps: 500
+  diffusion_noise_schedule: 'cosine'
+  transition: 'marginal'        # uses the de=11 edge marginal as the limit dist
+
+  extra_features: 'all'         # AUX FEATURES ON (cycles + eigenvalues); required
+
+  lambda_train:
+    - 1.0   # X  (trivial: dx=1, single node type)
+    - 5.0   # E  (the learning signal — coarse topology + weight classes)
+    - 1.0   # y
+
+train:
+  n_epochs: 100
+  batch_size: 32
+  lr: 0.0001
+  weight_decay: 0.00012
+  num_workers: 0
+  log_every_steps: 50
+  save_every_epochs: 25
