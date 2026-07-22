@@ -1312,16 +1312,32 @@ class CoarseGraphDataset(Dataset):
     Each record is a dict; the loader only needs record['coarse'] (a PyG Data).
     The partition fields (assignment, cluster_sizes) ride along for Stages C/D/E
     but are not served to the latent diffusion.
+
+    `binary_edges=True` collapses the de=11 weight classes down to de=2
+    (no-edge / edge) on the fly — the ablation that tests whether modelling the
+    weight classes costs the diffusion its topology fidelity. It reuses the same
+    coarse cache (no re-coarsening); the collapse is valid because class 0 is
+    never set on a present edge, so every present edge simply becomes class 1.
     """
 
-    def __init__(self, records):
+    def __init__(self, records, binary_edges: bool = False):
         self.records = records
+        self.binary_edges = binary_edges
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, idx):
-        return self.records[idx]['coarse']
+        data = self.records[idx]['coarse']
+        if not self.binary_edges:
+            return data
+        # Fresh Data — never mutate the cached record in place.
+        edge_attr = torch.zeros(data.edge_attr.shape[0], 2, dtype=data.edge_attr.dtype)
+        edge_attr[:, 1] = 1.0
+        return torch_geometric.data.Data(
+            x=data.x, edge_index=data.edge_index, edge_attr=edge_attr,
+            y=data.y, n_nodes=data.n_nodes,
+        )
 
 
 class CoarseGraphDataModule(_SyntheticDataModuleBase):
@@ -1374,9 +1390,14 @@ class CoarseGraphDataModule(_SyntheticDataModuleBase):
             print(f"  [CoarseGraph] {split}: {len(records)} graphs from {path}")
             return records
 
-        self.train_dataset = CoarseGraphDataset(_load('train'))
-        self.val_dataset = CoarseGraphDataset(_load('val'))
-        self.test_dataset = CoarseGraphDataset(_load('test'))
+        # de=2 ablation: collapse weight classes to no-edge/edge (reuses the cache).
+        binary_edges = getattr(cfg.dataset, 'binary_edges', False)
+        if binary_edges:
+            print("  [CoarseGraph] binary_edges=True -> de=2 (weight classes collapsed)")
+
+        self.train_dataset = CoarseGraphDataset(_load('train'), binary_edges)
+        self.val_dataset = CoarseGraphDataset(_load('val'), binary_edges)
+        self.test_dataset = CoarseGraphDataset(_load('test'), binary_edges)
 
         self.batch_size = cfg.train.batch_size if 'debug' not in cfg.general.name else 2
         self.num_workers = getattr(cfg.train, 'num_workers', 0)
