@@ -29,7 +29,7 @@ current record (ETH-2024 iterative local expansion) is ~5037 nodes. We aim for
      contribution; design is multi-pass, variable-grouping refinement.
 
 Full design rationale, related work, and open questions live in
-[BlockDiffusion/scalable_block_diffusion_brainstorm(1).md](scalable_block_diffusion_brainstorm(1).md).
+[BlockDiffusion/scalable_block_diffusion_brainstorm.md](scalable_block_diffusion_brainstorm.md).
 Key competitors to beat/cite: **HiGen** (closest), **LGDC** (closest framing),
 **PARD** (block diffusion on graphs), **SparseDiff** (sparse single-model).
 
@@ -253,9 +253,12 @@ building `A_c`.
 >   up as "holes"/uneven triangulation in the generated coarse graph).
 > - First run (100 epochs) had **non-converged val NLL** (bounced 1800–2200) →
 >   undertrained. Next step: longer training pass (n_epochs bumped to 1000).
-> - Coarse `G_c` is intrinsically harder than the planar input: coarsening breaks
->   planarity, so `G_c` is dense (~0.11), non-planar, *weighted* — no clean planar
->   regularity. Holes in `G_c` will **propagate** into any decoded full graph.
+> - Coarse `G_c` is weighted and denser (~0.11), but the earlier claim that
+>   coarsening breaks planarity was wrong. Contracting connected clusters in a
+>   planar graph produces a planar minor, and the decoder extractor verified all
+>   Loukas clusters are connected. Oracle `G_c` must therefore remain planar;
+>   generated Stage-B samples should be scored for planarity. Holes in generated
+>   `G_c` will still **propagate** into any decoded full graph.
 
 The two halves are currently **independent**: DiGress trains/samples graphs;
 `coarsen_mini` reduces a single PyG graph. The project glues them:
@@ -412,8 +415,10 @@ clamping.
 so every cluster `B_i` *should* be a connected subgraph. If true, Stage D should
 generate connected subgraphs. Assert it in the extractor.
 
-**RISK ON THE RECORD:** nothing in this decoder guarantees **planarity**. `G_c`
-isn't planar, and factorized intra+inter generation has no planarity constraint.
+**RISK ON THE RECORD:** nothing in this decoder guarantees **planarity**. Oracle
+`G_c` is planar (it is a minor when clusters are connected), but factorized
+intra+inter expansion can realize its coarse edges with mutually incompatible
+fine endpoints and create a non-planar expansion.
 Planar validity is the headline metric. ETH-2024 gets it from local expansion +
 refinement; we have no equivalent. Think about a planarity-aware sampling mask
 (à la DiGress's valency mask) *before* eval, not after.
@@ -445,7 +450,10 @@ will be markedly slower at 40k.
 - Pure PyTorch (no pytorch-lightning). Config = YAML → `DotDict` (dot access).
 - Configs in `BlockDiffusion/configs/`. `config_*.yaml` per dataset; `dignode*`
   for CoraChameleon node-sliced runs.
-- Run GPU smoke tests by handing the user runnable code (see workflow notes).
+- **Local environment has no PyTorch or PyTorch Geometric.** Only run quick,
+  dependency-free checks locally. For anything requiring torch/PyG, a GPU, full
+  datasets, or appreciable runtime, give the user explicit runnable commands;
+  do not launch it locally.
 - coarsen_mini import root: `PYTHONPATH=<parent of coarsen_mini>` i.e. run from
   inside `BlockDiffusion/`.
 
@@ -509,6 +517,306 @@ will be markedly slower at 40k.
   `clustering MMD` + comparison PNGs → picks Architecture A vs B (§6c). Then
   build the Stage-D/E training-data extractor (`B_i`, `(B_i,B_j,w_ij)`, `e_i`,
   assert cluster connectivity) — needed regardless of which architecture wins.
+- **2026-09-09** — Added `datasets/decoder_blocks.py`, the first Stage-D/E
+  implementation layer. It losslessly partitions every fine edge into exact
+  intra blocks `A_ii` and inter blocks `A_ij`, computes unbucketed `e_i/w_ij`,
+  checks cluster connectivity and all node/edge/coarse-support invariants, and
+  reconstructs the original graph as a round-trip assertion. New coarse caches
+  store `source_index` so skipped graphs cannot misalign fine/coarse records;
+  legacy caches remain usable when split lengths match. Added CPU-only stdlib
+  tests in `tests/test_decoder_blocks.py`. Added `build_decoder_dataset.py` to
+  materialize plain-dictionary `{train,val,test}.pt` decoder caches plus a
+  `summary.json` containing cluster-size and exact `e_i/w_ij` distributions.
+- **2026-09-09** — Real r=0.8 extraction passed on all 6000 planar graphs:
+  594k intra blocks, ~1.69M inter blocks, mean/max cluster size 5.05/17,
+  inter budget mean/max 2.57/10, and **zero disconnected clusters**. Added
+  `datasets/decoder_regions.py`, defining the oracle local training contract:
+  intra regions update all internal pairs; inter regions expose both fixed
+  intra subgraphs and update only the bipartite rectangle; both carry exact
+  edge budgets, global-node maps, cluster-side labels, and total fine degrees.
+  Added `datasets/decoder_dataset.py`, an on-demand torch Dataset with compact
+  numpy indices (rather than duplicating ~1.9M payloads) and a dense-local padded
+  collator. Singleton intra clusters are skipped by default because they contain
+  no edge variable; inter regions are all retained. Real torch/PyG validation is
+  provided by the bounded `smoke_decoder_dataset.py` command for the user to run
+  in the ML environment.
+- **2026-09-09** — Added `diffusion/masked_edge_diffusion.py`. Its forward
+  process noises only upper-triangular variables selected by each region's
+  `update_mask`, preserves frozen context exactly, supports separate intra/inter
+  limiting marginals, and computes per-region-balanced x0 edge CE. The bounded
+  smoke command now checks symmetry, frozen context, finite loss, and backward.
+- **2026-09-09** — Added `models/block_denoiser.py`, a shared local
+  GraphTransformer for intra/inter regions. Inputs are all inference-available:
+  noisy edges, update-vs-frozen mask, block kind, cluster side/size, current
+  (not target) degree, time, and oracle edge budget. Ground-truth final degree is
+  deliberately excluded to prevent leakage. `OracleRegionDataset` now computes
+  exact separate intra/inter no-edge/edge marginals, and the bounded smoke test
+  performs a full denoiser forward/loss/backward pass.
+- **2026-09-09** — Added `train_block_decoder.py` and
+  `configs/config_oracle_block_decoder.yaml`. Training is bounded by optimizer
+  steps (not misleading 1.9M-region epochs), uses 50/50 intra/inter sampling,
+  bounded infrequent validation with separate kind losses, no in-loop graph
+  sampling/MMD, atomic periodic/best checkpoints, and resume support.
+- **2026-09-09** — CUDA trainer smoke passed on the real cache (10 steps,
+  batch 64): val loss 0.3745, intra/inter loss 0.4687/0.2803, edge accuracy
+  0.7896; checkpointing completed. Treat these only as systems-test numbers.
+  First observed throughput was ~0.59 step/s, so run a longer warm benchmark
+  before committing to the default 20k-step budget. Mirrored the full current
+  implementation status into `scalable_block_diffusion_brainstorm.md` §0.1.
+- **2026-09-09** — 500-step calibration passed at batch 256: val loss 0.2801
+  (intra/inter 0.3452/0.2150), accuracy 0.8849, stable ~6.8 steps/s. Added the
+  analytic mask-preserving reverse posterior and full local reverse chain to
+  `masked_edge_diffusion.py`; next validate it in the bounded ML smoke command,
+  then evaluate sampled oracle blocks before extending training.
+- **2026-09-09** — Reverse-chain ML smoke passed. Added
+  `evaluate_block_decoder.py` for held-out oracle-region generation from a
+  checkpoint. It reports intra/inter edge-budget MAE and exact-match rate,
+  edge-count histogram TV, sample density, edge accuracy/Jaccard, generated
+  intra connectivity, and inter non-emptiness while the sampler asserts frozen
+  context and symmetry throughout.
+- **2026-09-09** — v2 step-500 sampling beats step-200 on intra count MAE
+  (0.70 vs 0.93) and count-histogram TV (0.195 vs 0.219), with 100% generated
+  intra connectivity. Inter projection gives exact budgets/nonempty blocks by
+  construction; endpoint Jaccard remains low (~0.085), so the next decisive test
+  is whole-graph structure. Added `generate_oracle_graphs.py`: the complete
+  two-phase oracle baseline samples all intra blocks, injects those *generated*
+  interiors as frozen context for inter sampling, assembles the 500-node graph,
+  asserts global cross-edge budgets, and reports connectivity/planarity/basic
+  structural statistics.
+- **2026-09-10** — Added `generate_alternating_oracle_graphs.py`, an
+  inference-only Option-2 diagnostic over a single coherent fine-graph state.
+  Each reverse step updates all intra blocks against one pre-phase global-degree
+  vector, recomputes degrees, then updates all inter blocks against one
+  post-intra vector. Chunking does not introduce autoregression. It deliberately
+  uses the existing v2 local checkpoint first; results are diagnostic because
+  that checkpoint was not trained on global alternating states.
+- **2026-09-10** — Inference-only alternation on records 89/425 confirmed the
+  expected train/test state mismatch: still 0/2 planar, with edges 1472→1207,
+  clustering 0.248→0.138, transitivity 0.219→0.129 versus two-phase. The v2
+  network interpreted global degrees using weights trained on local degrees and
+  deleted intra edges. Do not treat this as an Option-2 result. Next build a
+  graph-centric trainer that noises all blocks at a shared t, computes global
+  state degrees, and trains the alternating kernels on their inference-time
+  conditioning distribution.
+- **2026-09-10** — Added graph-contextual alternating training:
+  `datasets/alternating_training.py`, `train_alternating_decoder.py`, and
+  `configs/config_alternating_decoder.yaml`. For each graph/shared t it samples
+  blockwise `intra_t + inter_t` for the intra kernel and teacher-forced
+  `intra_{t-1} + inter_t` for the inter kernel, aggregates full-graph degrees
+  without an N² tensor, and selects balanced local losses from that coherent
+  state. Supports v2 weight initialization, bounded steps/validation, resume,
+  and checkpoints. Needs the bounded CUDA smoke run next.
+- **2026-09-10** — The five-step graph-contextual CUDA smoke passed from the v2
+  step-500 initialization: validation loss 0.3702 (intra 0.4033, inter 0.3372)
+  with successful forward/backward, validation, and checkpointing. Treat these
+  strictly as systems-test values. Next run a 500-step calibration, then use
+  the alternating whole-graph generator on the same validation records 89/425.
+- **2026-09-10** — The 500-step graph-contextual calibration completed at a
+  stable ~5.27 steps/s. Validation was best at step 250: total 0.2570, intra
+  0.3220, inter 0.1920. Step 500 was slightly worse at 0.2633/0.3257/0.2010, so
+  select `experiments/alternating_decoder_v3_calibration/best.pt` (step 250)
+  for matched whole-graph evaluation on records 89/425 before doing more
+  training.
+- **2026-09-10** — Matched step-250 alternation partially recovered the v2
+  mismatch collapse but did not beat two-phase: mean edges 1,374, clustering
+  0.198, transitivity 0.190, connectivity 1/2, planarity 0/2. Decomposition
+  proved both failure sources independently: generated-intra + oracle-inter and
+  oracle-intra + generated-inter were each non-planar for every run. Context v3
+  had mean 4.5 non-planar and 4 disconnected intra blocks per graph. Added
+  `planar_block_projection.py` plus `diagnose_block_failures.py --planar-project`:
+  it repairs each intra block to connected-planar, realizes a coarse spanning
+  tree first, then fills inter budgets greedily under global planarity while
+  measuring edge retention and any infeasible budget deficit. This is the next
+  feasibility diagnostic; global degree alone is insufficient.
+- **2026-09-10** — Projection ablations validate the diagnosis. Oracle inputs
+  pass unchanged with zero deficit. Generated-intra+oracle-inter loses 193.5
+  of 720 inter edges; oracle-intra+generated-inter loses 277. Projection is
+  therefore not an acceptable final decoder. The benchmark graphs are uniform
+  2D point sets followed by Delaunay triangulation, but generation discarded
+  positions. Added `generate_planar_graph_and_positions` and
+  `recover_planar_positions.py`, which deterministically replays the original
+  SeedSequence streams and refuses to save unless every regenerated edge set
+  exactly matches the existing pickle. Next verify/recover validation positions,
+  then prototype the geometry-preserving decoder.
+- **2026-09-10** — Float64 position replay exactly reconstructs records 89/425
+  via Delaunay (~4.6 ms/graph). Fresh 500-node samples match the dataset family
+  (1,481 edges, clustering 0.436), and a 40k-node connected planar Delaunay graph
+  with 119,975 edges took 6.09 s without dense adjacency. This is explicitly a
+  provenance-aware ceiling, not a learned result. Added the lossless
+  centroid/local-offset representation in `datasets/coordinate_blocks.py`, 3
+  dependency-free tests (13 total pass), and `build_coordinate_dataset.py`.
+  This is a planar-dataset diagnostic only, not the main model: the target method
+  must support citation, ego, and arbitrary sparse graphs without coordinates.
+- **2026-09-10** — Implemented generic sparse-global-context v4. At each shared
+  reverse time, `datasets/alternating_training.py` packs two coherent full-graph
+  phase states using only intra/coarse-supported candidate pairs. A new
+  `SparseGlobalContextEncoder` performs index-add message passing on that sparse
+  support; each local block gathers its fine-node embeddings and injects them
+  into the existing shared denoiser. Complexity is linear in graph size for
+  bounded blocks/coarse degree. The local v3 step-250 weights remain compatible;
+  new context parameters initialize separately. Training, validation, and
+  alternating inference now understand this context. Config:
+  `configs/config_sparse_context_decoder.yaml`. Static parsing, diff checks, and
+  all 13 dependency-free tests pass. The five-step CUDA smoke also passed:
+  validation loss 0.3238 (intra 0.3757, inter 0.2720). The 500-step calibration
+  will log the sparse encoder's gradient norm explicitly.
+- **2026-09-10** — V4's 500-step calibration passed. Sparse-context gradients
+  remained nonzero (roughly 0.0014–0.0398), confirming the new pathway learns;
+  throughput stabilized near 2.96 steps/s. Best is step 250: validation 0.2535,
+  intra 0.3179, inter 0.1891, a modest improvement over degree-only v3 at
+  0.2570/0.3220/0.1920. Step 500 regressed to 0.2625. Select
+  `experiments/sparse_context_decoder_v4_calibration/best.pt` for full-graph
+  records 89/425 before doing any longer training.
+- **2026-09-10** — V4 full graphs improve v3 modestly: mean edges 1,374→1,399,
+  clustering 0.198→0.214, transitivity 0.190→0.196, connectivity 1/2→2/2;
+  still 0/2 planar and below independent v2 clustering 0.248. Do not extend v4
+  blindly. The historical weighted and binary coarse runs are not controlled:
+  de=11 used r=0.9/normalized-self-loop/~50 nodes/5 layers, while de=2 used
+  r=0.8/normalized/~100 nodes/10 layers. Decoder tests still use oracle exact
+  `w_ij`; learned weights are unresolved. Next decouple them: binary diffusion
+  for coarse topology plus a separate sparse positive-integer edge-weight head.
+- **2026-09-10** — Matched step-250 alternating generation on records 89/425
+  only partially repaired the mismatch: mean edges/clustering recovered from
+  1,207/0.138 to 1,374/0.198, but stayed below two-phase 1,472/0.248 and target
+  1,481.5/0.442. Connectivity was 1/2 and planarity 0/2. Added decomposition
+  diagnostics and `diagnose_block_failures.py` to test saved graphs as
+  generated-intra+oracle-inter and oracle-intra+generated-inter hybrids before
+  choosing the next model change.
+- **2026-09-10** — Static validation of the alternating trainer passed: all
+  changed Python files parse, the 10 dependency-free decoder tests pass, and
+  `git diff --check` is clean. Removed an unnecessary flat index over ~1.9M
+  regions from alternating-trainer startup by computing exact marginals
+  directly from graph records. Alternating generation metadata now identifies
+  graph-context-trained checkpoints instead of labeling every run as the old
+  v2 distribution-shift diagnostic. Next gate is a 5-step CUDA smoke run.
+- **2026-09-09** — First two complete oracle two-phase graphs exposed the main
+  independence failure: both have 500 nodes, near-correct edge count, and are
+  connected, but **0/2 are planar**. Mean clustering fell 0.442→0.248 and
+  transitivity 0.383→0.219. This is not an oracle-coarsening failure: connected
+  cluster contraction preserves planarity, so oracle `G_c` is a planar minor.
+  The arbitrary mutually independent fine endpoint choices make the expansion
+  non-planar. Corrected `main.py` to include planarity in coarse-planar metrics.
+  Next priority is contextual/alternating inter refinement, not longer v2
+  training.
+- **2026-09-09** — First step-500 sampling diagnostic: intra connectivity 100%,
+  but intra/inter edge counts overshot (8.83 vs 8.30 and 3.19 vs 2.68); inter
+  exact-budget rate 32.8%, nonempty 96.1%. Found and fixed oracle `e_i` leakage:
+  the denoiser now receives a budget only for inter regions. Added stochastic
+  Gumbel top-k final projection so inter samples obey the legitimate oracle
+  `w_ij` blueprint exactly without making edge placement deterministic. The old
+  checkpoint is diagnostic only; retrain the corrected model from scratch.
+- **2026-09-10** — Implemented topology/weight separation for replacing oracle
+  coarse-edge budgets. `models/coarse_weight_predictor.py` is a sparse
+  message-passing encoder over binary `E_c` and cluster sizes with a symmetric
+  categorical edge head. Dynamic masking guarantees positive integer outputs
+  no larger than `v_i*v_j`; out-of-range training targets raise instead of
+  silently clipping. Added graph-batch packing, a bounded trainer/checkpointer,
+  and a v1 config. Static parsing, all 13 dependency-free tests, and
+  `git diff --check` pass. Next gate is a fail-fast 5-step CUDA smoke followed
+  by a 500-step calibration.
+- **2026-09-10** — Coarse-weight smoke and 500-step calibration passed. Best
+  validation is step 400: loss 1.4683, exact multiplicity 35.7%, MAE 0.993;
+  step 500 is similar at 1.4686/35.5%/0.984, and throughput reached 52 steps/s.
+  Since the curve plateaued, added `evaluate_coarse_weight_predictor.py` to
+  score the full validation split against constant-mode and endpoint-size-mode
+  baselines and export decoder-ready budgets. Alternating generation now accepts
+  `--edge-budget-predictions`, validates every predicted capacity, and records
+  budget provenance. `run_coarse_weight_evaluation.sh` performs both the full
+  comparison and a v4 learned-budget decode on records 89/425 in one command.
+- **2026-09-10** — Weight decision-rule calibration resolved the apparent mass
+  deficit. Rounded posterior mean has full-val per-edge MAE 0.938 and matches
+  mean weight (2.579 predicted vs 2.569 target), reducing mean absolute total
+  inter-budget error to 6.16 edges (mode: 102.74). Two v4 decodes then retained
+  734 inter edges and 1,422 total edges with 2/2 connectivity, but remained 0/2
+  planar and low-clustering (0.203). Lock rounded mean for graph budgets; weight
+  prediction is not the source of the remaining structural failure.
+- **2026-09-10** — Corrected the scaling plan: one r=0.8 transition only expands
+  ~100→500 nodes and cannot directly reach 5k/10k without making dense Stage B
+  large again. Production scaling must recurse bounded transitions, e.g.
+  80→400→2000→10000. Added machine-readable saving and `--num-samples` to
+  coarse DiGress sampling plus `run_sample_binary_coarse.sh`; sample the existing
+  binary checkpoint next, then build the per-level size head and multilevel
+  transition cache.
+- **2026-09-10** — The existing binary coarse DiGress checkpoint sampled poorly
+  at epoch 70 (16 samples: planar accuracy 0%, clustering/triangle MMD
+  0.542/0.729), but the run stopped at epoch 94 of its configured 5000. This is
+  evidence only that the checkpoint is undertrained, not that DiGress should be
+  rejected. Retracted the premature EDGE-switch proposal: DiGress remains the
+  Stage-B backbone. Finish the size-prediction and generated-coarse adapter first,
+  then resume Stage B with sampling-based monitoring and fully train the decoder.
+- **2026-09-10** — Implemented Stage C and the first non-oracle end-to-end
+  adapter. `CoarseClusterSizePredictor` sparsely message-passes over binary
+  coarse topology, conditions on requested final N, and likelihood-projects
+  positive integer sizes to sum exactly to N. `generated_blueprint_record`
+  constructs the decoder contract from generated topology/sizes/weights with
+  no fine oracle edges. `generate_end_to_end.py` composes saved DiGress samples,
+  size prediction, rounded-mean weight prediction, and v4 alternating decoding.
+  Added a fail-fast smoke→500-step size calibration→two-graph E2E runner. All
+  Python parses, 17 dependency-free tests pass, shell parses, and diff check is
+  clean. This first run is a systems diagnostic because Stage B and v4 are not
+  fully trained.
+- **2026-09-10** — Full coarse-weight validation (500 graphs/140,960 edges)
+  beats both non-neural baselines: learned exact/MAE/RMSE is
+  35.54%/0.991/1.373, constant-mode is 28.17%/1.569/2.074, and endpoint-size
+  mode is 28.79%/1.411/1.890. Learned mean weight is biased low (2.205 vs 2.569),
+  but whole-graph inter-budget MAE improves to 102.7 edges from 442.4/267.5.
+  The first downstream run exposed that `make_inter_region` correctly rejected
+  mutating cached oracle `w_ij`. Fixed the interface by retaining validation of
+  oracle count and adding a distinct capacity-checked sampling-budget override;
+  15 dependency-free tests now pass. Rerun only the two-graph decode.
+- **2026-09-14** — Sampled-size end-to-end gate passed. Two generated-topology,
+  non-oracle 500-node graphs were connected with 1421/1431 edges. Sampled and
+  exact-N-projected cluster sizes restored the data distribution (ranges 1--12
+  and 1--11; std 1.725/1.623 vs train 1.618), fixing rounded-mean collapse to
+  5--6. Outputs remain non-planar and low-clustering because Stage B is epoch 70
+  and v4 is step 250. Added resumable full-training runners: decoder to step
+  5000 first, then binary DiGress from best epoch 70 to epoch 500. DiGress now
+  records cheap connectivity/planarity/clustering sample monitors every 100
+  epochs and resume starts at checkpoint epoch + 1. All 17 local tests pass.
+- **2026-09-14** — Full v4 decoder run completed through step 5000; best is step
+  4000 with validation 0.2348 (intra/inter 0.2958/0.1738), improving step 250's
+  0.2535. Oracle-blueprint clustering rose 0.214→0.318. Fully non-oracle sampled-
+  size outputs have 1430/1433 edges, 2/2 connectivity, and clustering
+  0.322/0.338 (about 0.330 mean), but remain non-planar. This establishes useful
+  learning from longer decoder training while confirming planarity is a global
+  coherence issue, not merely undertraining. The DiGress resume runner now goes
+  to epoch 500, evaluates 32 final coarse samples, and automatically decodes two
+  through the full pipeline.
+- **2026-09-28** — Reconstructed the completed Stage-B resume. It reached epoch
+  499 (best validation checkpoint epoch 361, NLL 1705.29); there is no unfinished
+  epoch-500 tranche to resume. Epoch 100/200/300/400 monitors were all connected
+  but 0% planar. Final 32-sample test clustering MMD improved only 0.542→0.501
+  from the old checkpoint, triangle MMD worsened 0.729→0.763, and planarity
+  stayed 0%. Full-pipeline outputs with the step-4000 decoder had 1430/1419
+  edges, clustering 0.320/0.341, 2/2 connectivity, and 0/2 planarity.
+- **2026-09-28** — Reopened the coarse-weight design. V1 independently rounds
+  per-edge categorical posterior means after node message passing. Although it
+  matches marginal mean weight and total inter mass, it does not model incident
+  weight sums `s_i=sum_j w_ij`, correlations among edges sharing a supernode,
+  compatibility with generated intra blocks, or topology/size distribution
+  shift. Next experiment is a four-way decoder ablation: oracle weights; no
+  weight conditioning/projection; current independent head; then (only if
+  explicit budgets help) joint sparse diffusion over weights on `E_c` with node-
+  strength and total-mass objectives. Do not resume long training before this
+  interface choice is resolved.
+- **2026-09-28** — Proposed the next benchmark and inference design. Added
+  `datasets/generate_sbm_ks.py`, a reproducible mixed-size balanced two-block
+  SBM generator (64/128 nodes, 5,000/500/500 total graphs by default, expected
+  degree 16, KS margin 7 > 1, randomized membership, split-leakage checks).
+  Planarity is demoted from the primary development gate. Target node count must
+  condition every expansion; the present size head's exact-N projection does
+  not imply 500-to-10k extrapolation. Train bounded recursive levels such as
+  80→400→2000→10000. CRM's current latent `u` is log-sociability, not community
+  identity; the LSP/SBM extension should retain `u` for degree and add a
+  diffused membership latent plus block-affinity prior for coarse connectivity.
+- **2026-09-28** — Generated and validated the SBM collection: 5,000/500/500
+  mixed 64/128-node graphs, realized split mean degrees 16.000/15.983/16.006,
+  all connected. Added `config_coarse_sbm_ks_de2.yaml` and generalized the
+  coarse loader/cache naming and metrics so SBM does not inherit planarity
+  checks. Stage B now accepts a log-scaled requested fine-N graph condition,
+  retains it through reverse diffusion, and pairs 64/128 targets with 13/26
+  coarse nodes under r=0.8. Added bounded train/validation-batch and skip-final-
+  evaluation CLI flags so the first CUDA check can be five batches, not epochs.
 
 ## 9. Files I have NOT yet read in depth
 (ask the user for these if/when needed, per workflow preference — don't grep)
