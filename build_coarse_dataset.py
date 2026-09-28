@@ -20,7 +20,12 @@ from datasets.coarsen_pipeline import build_coarse_cache
 
 def main():
     ap = argparse.ArgumentParser(description="Prebuild the coarse G_c cache (optional).")
-    ap.add_argument("--planar-dir", type=str, default="data/planar500")
+    ap.add_argument(
+        "--graph-dir", "--planar-dir", dest="graph_dir", type=str,
+        default="data/planar500",
+        help="Directory containing train.pkl, val.pkl and test.pkl. "
+             "--planar-dir is retained as a backward-compatible alias.",
+    )
     ap.add_argument("--cache-dir", type=str, default="data/coarse_planar")
     ap.add_argument("--r", type=float, default=0.9)
     ap.add_argument("--K", type=int, default=100)
@@ -31,7 +36,7 @@ def main():
     args = ap.parse_args()
 
     subdir = build_coarse_cache(
-        args.planar_dir, args.cache_dir, args.r, args.K,
+        args.graph_dir, args.cache_dir, args.r, args.K,
         args.laplacian_kind, args.method, force_rebuild=args.force_rebuild,
     )
     print(f"\nDone. Coarse cache at {subdir}")

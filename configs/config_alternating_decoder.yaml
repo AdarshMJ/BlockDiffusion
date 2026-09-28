@@ -1,0 +1,36 @@
+# Graph-contextual fine-tuning for the alternating decoder.
+seed: 42
+output_dir: experiments/alternating_decoder_v3
+
+data:
+  train: data/decoder_blocks/r0.8_normalized_edges_K100/train.pt
+  val: data/decoder_blocks/r0.8_normalized_edges_K100/val.pt
+
+diffusion:
+  timesteps: 200
+  noise_schedule: cosine
+
+model:
+  n_layers: 5
+  dx: 128
+  de: 64
+  dy: 64
+  n_head: 8
+  dim_ffX: 256
+  dim_ffE: 128
+  max_degree: 16.0
+  max_nodes: 40.0
+  max_edge_budget: 40.0
+
+train:
+  max_steps: 5000
+  graphs_per_step: 4
+  regions_per_graph: 64
+  intra_fraction: 0.5
+  lr: 0.0001
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  log_every: 25
+  validate_every: 250
+  validation_batches: 10
+  save_every: 500

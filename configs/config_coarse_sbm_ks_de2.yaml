@@ -1,0 +1,63 @@
+# Size-conditioned binary Stage-B baseline for the generated KS-safe SBM set.
+# Use --max-epochs 5 for the fail-fast CUDA smoke. The first invocation lazily
+# builds the coarse cache; subsequent invocations reuse it.
+
+general:
+  name: 'coarse_sbm_ks_de2'
+  seed: 42
+  check_val_every_n_epochs: 50
+  sample_every_val: 50
+  number_chain_steps: 1
+  samples_to_generate: 32
+  chains_to_save: 0
+  final_model_samples_to_generate: 100
+  final_model_samples_to_save: 10
+
+dataset:
+  name: 'coarse_graph'
+  source_family: 'sbm'
+  num_train_graphs: 5
+  pin_memory: false
+  binary_edges: true
+  condition_on_n_orig: true
+  size_condition_scale: 10000
+  sample_target_ns: [64, 128]
+
+coarsening:
+  graph_dir: 'data/sbm_ks_n64_n128'
+  cache_dir: 'data/coarse_sbm_ks_n64_n128'
+  r: 0.8
+  # K must be smaller than the smallest source graph (64).
+  K: 32
+  laplacian_kind: 'normalized'
+  method: 'edges'
+  force_rebuild: false
+
+model:
+  n_layers: 6
+  hidden_dims:
+    dx: 256
+    de: 64
+    dy: 64
+    n_head: 8
+    dim_ffX: 256
+    dim_ffE: 64
+    dim_ffY: 256
+  hidden_mlp_dims:
+    X: 256
+    E: 128
+    y: 128
+  diffusion_steps: 500
+  diffusion_noise_schedule: 'cosine'
+  transition: 'marginal'
+  extra_features: 'all'
+  lambda_train: [1.0, 5.0, 1.0]
+
+train:
+  n_epochs: 1000
+  batch_size: 32
+  lr: 0.0001
+  weight_decay: 0.00012
+  num_workers: 0
+  log_every_steps: 100
+  save_every_epochs: 50

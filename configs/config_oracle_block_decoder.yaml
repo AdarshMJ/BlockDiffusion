@@ -1,0 +1,38 @@
+# Oracle local decoder baseline (Option 0 engine + Option 1 factorization).
+# Training is step-bounded; it does not sample graphs or compute MMD metrics.
+
+seed: 42
+device: cuda
+output_dir: experiments/oracle_block_decoder_r08
+
+data:
+  train: data/decoder_blocks/r0.8_normalized_edges_K100/train.pt
+  val: data/decoder_blocks/r0.8_normalized_edges_K100/val.pt
+
+diffusion:
+  timesteps: 200
+  noise_schedule: cosine
+
+model:
+  n_layers: 5
+  dx: 128
+  de: 64
+  dy: 64
+  n_head: 8
+  dim_ffX: 256
+  dim_ffE: 128
+  max_degree: 16.0
+  max_nodes: 40.0
+  max_edge_budget: 40.0
+
+train:
+  max_steps: 20000
+  batch_size: 256
+  intra_fraction: 0.5
+  lr: 0.0002
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  log_every: 50
+  validate_every: 1000
+  validation_batches: 50
+  save_every: 1000

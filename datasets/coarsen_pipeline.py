@@ -5,7 +5,7 @@ Used by both:
     cache lazily on first run), and
   - the optional standalone `build_coarse_dataset.py` (prebuild on a CPU node).
 
-Coarsens planar nx graphs into G_c records and encodes integer super-edge weights
+Coarsens NetworkX graphs into G_c records and encodes integer super-edge weights
 into `de=11` Option-A buckets:  class 0 = no-edge (filled by DiGress's
 encode_no_edge), classes 1..9 = exact weight, class 10 = weight >= 10.
 
@@ -14,6 +14,7 @@ A record (per graph) is a dict:
       "coarse":        PyG Data (x=ones, edge_index, edge_attr[de=11], y, n_nodes),
       "assignment":    np.int64 (n_orig,)   original-node -> cluster id  (Stage C/D/E)
       "cluster_sizes": np.int64 (n_c,)       v_i                         (Stage C)
+      "source_index":  int                   index in the source split,
       "n_orig": int, "n_c": int, "r_actual": float,
     }
 We coarsen ONCE per (r, K, laplacian_kind, method) and cache to disk so Stages
@@ -56,7 +57,7 @@ def bucket_edge_attr(edge_weight: torch.Tensor) -> torch.Tensor:
     return F.one_hot(wi, num_classes=DE).float()
 
 
-def coarsen_one(G, r, laplacian_kind, method, K) -> dict | None:
+def coarsen_one(G, r, laplacian_kind, method, K, source_index=None) -> dict | None:
     """Coarsen a single nx graph into a record. None if degenerate (no inter edges)."""
     data = nx_to_data(G)
     partition, info = coarsen_loukas(
@@ -77,7 +78,7 @@ def coarsen_one(G, r, laplacian_kind, method, K) -> dict | None:
         y=torch.zeros([1, 0], dtype=torch.float),
         n_nodes=torch.tensor([n_c], dtype=torch.long),
     )
-    return {
+    record = {
         "coarse": coarse,
         "assignment": partition.assignment.astype(np.int64),
         "cluster_sizes": partition.cluster_sizes.astype(np.int64),
@@ -85,6 +86,9 @@ def coarsen_one(G, r, laplacian_kind, method, K) -> dict | None:
         "n_c": n_c,
         "r_actual": float(info["r_actual"]),
     }
+    if source_index is not None:
+        record["source_index"] = int(source_index)
+    return record
 
 
 def build_split(graphs, r, laplacian_kind, method, K, label="split"):
@@ -92,7 +96,7 @@ def build_split(graphs, r, laplacian_kind, method, K, label="split"):
     records, n_skipped = [], 0
     t0 = time.perf_counter()
     for i, G in enumerate(graphs):
-        rec = coarsen_one(G, r, laplacian_kind, method, K)
+        rec = coarsen_one(G, r, laplacian_kind, method, K, source_index=i)
         if rec is None:
             n_skipped += 1
             continue
@@ -123,12 +127,12 @@ def cache_tag(r, K, laplacian_kind, method) -> str:
     return f"r{r}_{laplacian_kind}_{method}_K{K}"
 
 
-def build_coarse_cache(planar_dir, cache_root, r, K, laplacian_kind, method,
+def build_coarse_cache(graph_dir, cache_root, r, K, laplacian_kind, method,
                        force_rebuild=False, splits=("train", "val", "test")):
     """Ensure the coarse cache exists; build any missing split. Returns the subdir.
 
     Cache layout:  <cache_root>/<cache_tag>/{train,val,test}.pt
-    Each split is (re)built from <planar_dir>/<split>.pkl only if its .pt is
+    Each split is (re)built from <graph_dir>/<split>.pkl only if its .pt is
     missing (or force_rebuild). Idempotent — safe to call every run.
     """
     subdir = os.path.join(cache_root, cache_tag(r, K, laplacian_kind, method))
@@ -138,13 +142,13 @@ def build_coarse_cache(planar_dir, cache_root, r, K, laplacian_kind, method,
         if os.path.exists(out_path) and not force_rebuild:
             print(f"  [coarsen] {split}: cache hit -> {out_path}")
             continue
-        pkl = os.path.join(planar_dir, f"{split}.pkl")
+        pkl = os.path.join(graph_dir, f"{split}.pkl")
         if not os.path.exists(pkl):
             print(f"  [coarsen] {split}: source {pkl} not found — skipping")
             continue
         with open(pkl, "rb") as fh:
             graphs = pickle.load(fh)
-        print(f"  [coarsen] {split}: building from {len(graphs)} planar graphs "
+        print(f"  [coarsen] {split}: building from {len(graphs)} source graphs "
               f"(r={r}, K={K}, {laplacian_kind}, {method}) ...", flush=True)
         records = build_split(graphs, r, laplacian_kind, method, K, split)
         torch.save(records, out_path)

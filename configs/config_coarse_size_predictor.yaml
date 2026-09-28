@@ -1,0 +1,20 @@
+seed: 42
+data:
+  train: data/decoder_blocks/r0.8_normalized_edges_K100/train.pt
+  val: data/decoder_blocks/r0.8_normalized_edges_K100/val.pt
+model:
+  hidden_dim: 128
+  num_layers: 4
+  max_size: 32
+  dropout: 0.1
+train:
+  max_steps: 500
+  graphs_per_batch: 8
+  validation_batches: 10
+  lr: 0.0003
+  weight_decay: 0.0001
+  grad_clip: 1.0
+  log_every: 25
+  validate_every: 100
+  save_every: 250
+output_dir: experiments/coarse_size_predictor_v1

@@ -5,6 +5,7 @@ Pure PyTorch implementation without pytorch-lightning.
 import os
 import sys
 import argparse
+import json
 import yaml
 import time
 from datetime import datetime
@@ -249,7 +250,7 @@ def create_datamodule(cfg):
         return CommunityDataModule(cfg)
     elif dataset_name == 'ego':
         return EgoDataModule(cfg)
-    elif dataset_name == 'coarse_planar':
+    elif dataset_name in ('coarse_planar', 'coarse_graph'):
         return CoarseGraphDataModule(cfg)
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
@@ -275,24 +276,35 @@ def create_sampling_metrics(cfg, datamodule):
         return CommunitySamplingMetrics(datamodule)
     elif dataset_name == 'ego':
         return EgoSamplingMetrics(datamodule)
-    elif dataset_name == 'coarse_planar':
-        # Coarse graphs are NOT planar (coarsening breaks planarity), so use the
-        # generic structural metric set — no 'planar'/'sbm' validity check.
+    elif dataset_name in ('coarse_planar', 'coarse_graph'):
+        metrics = ['degree', 'clustering', 'orbit', 'spectre',
+                   'triangle', 'assortativity', 'ple', 'cpl']
+        source_family = getattr(
+            cfg.dataset, 'source_family',
+            'planar' if dataset_name == 'coarse_planar' else 'generic',
+        )
+        if source_family == 'planar':
+            # Contracting connected clusters preserves planarity.
+            metrics.append('planar')
+        # The existing fine-SBM validity check hard-codes block sizes and
+        # probabilities that do not apply to contracted graphs. Coarse SBM is
+        # therefore judged by distributional metrics here.
         return SpectreSamplingMetrics(
-            datamodule, compute_emd=False,
-            metrics_list=['degree', 'clustering', 'orbit', 'spectre',
-                          'triangle', 'assortativity', 'ple', 'cpl'])
+            datamodule, compute_emd=False, metrics_list=metrics)
     else:
         return SpectreSamplingMetrics(datamodule)
 
 
-def train_epoch(model, train_loader, optimizer, device, epoch, log_every_steps=50):
+def train_epoch(model, train_loader, optimizer, device, epoch, log_every_steps=50,
+                max_batches=None):
     """Train for one epoch."""
     model.train()
     total_loss = 0
     num_batches = 0
     
     for batch_idx, data in enumerate(train_loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
         data = data.to(device)
         optimizer.zero_grad()
         
@@ -319,7 +331,7 @@ def train_epoch(model, train_loader, optimizer, device, epoch, log_every_steps=5
 
 
 @torch.no_grad()
-def validate(model, val_loader, device):
+def validate(model, val_loader, device, max_batches=None):
     """Validate the model."""
     model.eval()
     model.reset_metrics(test=False)
@@ -327,7 +339,9 @@ def validate(model, val_loader, device):
     total_nll = 0
     num_batches = 0
     
-    for data in val_loader:
+    for batch_idx, data in enumerate(val_loader):
+        if max_batches is not None and batch_idx >= max_batches:
+            break
         data = data.to(device)
         nll = model.validation_step(data)
         total_nll += nll if isinstance(nll, float) else nll.item()
@@ -376,6 +390,16 @@ def sample_and_evaluate(model, cfg, datamodule, sampling_metrics, visualization,
         all_samples.extend(samples)
         batch_id += 1
         print(f'Generated {len(all_samples)}/{n_samples} samples')
+
+    # Preserve machine-readable samples for downstream size/weight prediction
+    # and block decoding. Graphs can have different node counts, so store a
+    # torch list instead of padding a dense numpy array.
+    sample_path = os.path.join(cfg.general.experiment_dir, 'graphs', 'generated_samples.pt')
+    torch.save([
+        (node_types.detach().cpu(), edge_types.detach().cpu())
+        for node_types, edge_types in all_samples
+    ], sample_path)
+    print(f'Saved generated graph tensors -> {sample_path}')
 
     # Convert generated samples to NetworkX graphs
     gen_nx = []
@@ -545,12 +569,36 @@ def main():
                         help='Path to checkpoint for resuming/testing')
     parser.add_argument('--experiment_dir', type=str, default=None,
                         help='Use existing experiment directory (for test/sample modes)')
+    parser.add_argument('--num-samples', type=int, default=None,
+                        help='Override final_model_samples_to_generate')
+    parser.add_argument('--max-epochs', type=int, default=None,
+                        help='Override train.n_epochs for bounded/resumed runs')
+    parser.add_argument('--max-train-batches', type=int, default=None,
+                        help='Bound batches per epoch for a fail-fast smoke test')
+    parser.add_argument('--max-val-batches', type=int, default=None,
+                        help='Bound validation batches for a fail-fast smoke test')
+    parser.add_argument('--skip-final-eval', action='store_true',
+                        help='Skip final test/sampling metrics (smoke tests only)')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='Device to use')
     args = parser.parse_args()
     
     # Load config
     cfg = load_config(args.config)
+    if args.num_samples is not None:
+        if args.num_samples < 1:
+            raise ValueError('--num-samples must be positive')
+        cfg.general.final_model_samples_to_generate = args.num_samples
+    if args.max_epochs is not None:
+        if args.max_epochs < 1:
+            raise ValueError('--max-epochs must be positive')
+        cfg.train.n_epochs = args.max_epochs
+    for flag, value in (
+        ('--max-train-batches', args.max_train_batches),
+        ('--max-val-batches', args.max_val_batches),
+    ):
+        if value is not None and value < 1:
+            raise ValueError(f'{flag} must be positive')
     device = torch.device(args.device)
     print(f'Using device: {device}')
     
@@ -693,8 +741,9 @@ def main():
     # Load checkpoint if provided
     if args.checkpoint:
         print(f'Loading checkpoint from {args.checkpoint}')
-        start_epoch, best_val_nll = load_checkpoint(model, optimizer, args.checkpoint, device)
-        print(f'Resumed from epoch {start_epoch} with best val NLL {best_val_nll:.4f}')
+        checkpoint_epoch, best_val_nll = load_checkpoint(model, optimizer, args.checkpoint, device)
+        start_epoch = checkpoint_epoch + 1
+        print(f'Resumed after epoch {checkpoint_epoch} with best val NLL {best_val_nll:.4f}')
     
     if args.mode == 'train':
         print('Starting training...')
@@ -711,11 +760,13 @@ def main():
             
             # Train
             train_loss = train_epoch(model, train_loader, optimizer, device, epoch, 
-                                     log_every_steps=cfg.train.log_every_steps)
+                                     log_every_steps=cfg.train.log_every_steps,
+                                     max_batches=args.max_train_batches)
             print(f'Epoch {epoch} | Train Loss: {train_loss:.4f}')
             
             # Validate
-            val_nll = validate(model, val_loader, device)
+            val_nll = validate(model, val_loader, device,
+                               max_batches=args.max_val_batches)
             print(f'Epoch {epoch} | Val NLL: {val_nll:.4f}')
             
             # Update scheduler
@@ -745,8 +796,31 @@ def main():
                     number_chain_steps=cfg.general.number_chain_steps,
                     save_final=cfg.general.final_model_samples_to_save
                 )
+                sample_graphs = [nx.from_numpy_array(edge.bool().cpu().numpy())
+                                 for _, edge in samples]
+                monitor = {
+                    'epoch': epoch,
+                    'num_samples': len(sample_graphs),
+                    'mean_nodes': float(np.mean([g.number_of_nodes() for g in sample_graphs])),
+                    'mean_edges': float(np.mean([g.number_of_edges() for g in sample_graphs])),
+                    'mean_clustering': float(np.mean([nx.average_clustering(g) for g in sample_graphs])),
+                    'connected_fraction': float(np.mean([
+                        nx.is_connected(g) if g.number_of_nodes() else False for g in sample_graphs
+                    ])),
+                    'planar_fraction': float(np.mean([nx.check_planarity(g)[0] for g in sample_graphs])),
+                }
+                monitor_path = os.path.join(experiment_dir, 'logs', 'sampling_monitor.jsonl')
+                with open(monitor_path, 'a') as handle:
+                    handle.write(json.dumps(monitor) + '\n')
+                torch.save([(x.cpu(), e.cpu()) for x, e in samples],
+                           os.path.join(experiment_dir, 'graphs', f'samples_epoch_{epoch}.pt'))
+                print('Sampling monitor: ' + json.dumps(monitor))
         
         print('Training complete!')
+
+        if args.skip_final_eval:
+            print('Skipping final test and sampling evaluation (--skip-final-eval).')
+            return
         
         # Final test
         print('Running final test...')

@@ -136,7 +136,10 @@ class DiscreteDenoisingDiffusion(nn.Module):
         pred = self.forward(noisy_data, extra_data, node_mask)
         loss = self.train_loss(
             masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
-            true_X=X, true_E=E, true_y=data.y,
+            true_X=X, true_E=E,
+            # data.y may be a fixed graph condition (requested final N),
+            # while this model predicts no graph-level classes.
+            true_y=data.y[:, :self.ydim_output],
             log=step % log_every_steps == 0
         )
 
@@ -249,7 +252,7 @@ class DiscreteDenoisingDiffusion(nn.Module):
         kl_e = (self.test_E_kl if test else self.val_E_kl)(prob_true.E, torch.log(prob_pred.E))
         return self.T * (kl_x + kl_e)
 
-    def reconstruction_logp(self, t, X, E, node_mask):
+    def reconstruction_logp(self, t, X, E, y, node_mask):
         t_zeros = torch.zeros_like(t)
         beta_0 = self.noise_schedule(t_zeros)
         Q0 = self.transition_model.get_Qt(beta_t=beta_0, device=self.device)
@@ -261,7 +264,8 @@ class DiscreteDenoisingDiffusion(nn.Module):
 
         X0 = F.one_hot(sampled0.X, num_classes=self.Xdim_output).float()
         E0 = F.one_hot(sampled0.E, num_classes=self.Edim_output).float()
-        y0 = sampled0.y
+        # Graph-level conditioning is fixed and is never noised or predicted.
+        y0 = y
         assert (X.shape == X0.shape) and (E.shape == E0.shape)
 
         sampled_0 = utils.PlaceHolder(X=X0, E=E0, y=y0).mask(node_mask)
@@ -333,7 +337,7 @@ class DiscreteDenoisingDiffusion(nn.Module):
 
         loss_all_t = self.compute_Lt(X, E, y, pred, noisy_data, node_mask, test)
 
-        prob0 = self.reconstruction_logp(t, X, E, node_mask)
+        prob0 = self.reconstruction_logp(t, X, E, y, node_mask)
 
         loss_term_0 = self.val_X_logp(X * prob0.X.log()) + self.val_E_logp(E * prob0.E.log())
 
@@ -350,16 +354,32 @@ class DiscreteDenoisingDiffusion(nn.Module):
         return self.model(X, E, y, node_mask)
 
     @torch.no_grad()
-    def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, 
-                     number_chain_steps: int, save_final: int, num_nodes=None):
+    def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int,
+                     number_chain_steps: int, save_final: int, num_nodes=None,
+                     graph_y=None):
         """Sample a batch of graphs."""
+        if graph_y is None and getattr(self.cfg.dataset, 'condition_on_n_orig', False):
+            target_sizes = list(getattr(self.cfg.dataset, 'sample_target_ns', []))
+            if not target_sizes:
+                raise ValueError(
+                    "condition_on_n_orig requires dataset.sample_target_ns during sampling"
+                )
+            indices = (batch_id * batch_size + torch.arange(batch_size)) % len(target_sizes)
+            targets = torch.tensor(target_sizes, dtype=torch.float)[indices]
+            scale = float(getattr(self.cfg.dataset, 'size_condition_scale', 10000.0))
+            graph_y = (torch.log1p(targets) / torch.log1p(torch.tensor(scale))).unsqueeze(1)
+            if num_nodes is None:
+                coarsening = getattr(self.cfg, 'coarsening', None)
+                if coarsening is None:
+                    raise ValueError("automatic conditioned sampling requires coarsening.r")
+                num_nodes = torch.ceil((1.0 - float(coarsening.r)) * targets).to(torch.int)
         if num_nodes is None:
             n_nodes = self.node_dist.sample_n(batch_size, self.device)
         elif type(num_nodes) == int:
             n_nodes = num_nodes * torch.ones(batch_size, device=self.device, dtype=torch.int)
         else:
             assert isinstance(num_nodes, torch.Tensor)
-            n_nodes = num_nodes
+            n_nodes = num_nodes.to(device=self.device, dtype=torch.int)
         n_max = torch.max(n_nodes).item()
         
         arange = torch.arange(n_max, device=self.device).unsqueeze(0).expand(batch_size, -1)
@@ -367,6 +387,15 @@ class DiscreteDenoisingDiffusion(nn.Module):
         
         z_T = diffusion_utils.sample_discrete_feature_noise(limit_dist=self.limit_dist, node_mask=node_mask)
         X, E, y = z_T.X, z_T.E, z_T.y
+        if graph_y is not None:
+            graph_y = torch.as_tensor(graph_y, dtype=X.dtype, device=self.device)
+            if graph_y.ndim == 1:
+                graph_y = graph_y.unsqueeze(1)
+            if graph_y.shape[0] != batch_size:
+                raise ValueError(
+                    f"graph_y batch {graph_y.shape[0]} does not match batch_size={batch_size}"
+                )
+            y = graph_y
 
         assert (E == torch.transpose(E, 1, 2)).all()
         assert number_chain_steps <= self.T
@@ -513,8 +542,9 @@ class DiscreteDenoisingDiffusion(nn.Module):
         assert (E_s == torch.transpose(E_s, 1, 2)).all()
         assert (X_t.shape == X_s.shape) and (E_t.shape == E_s.shape)
 
-        out_one_hot = utils.PlaceHolder(X=X_s, E=E_s, y=torch.zeros(y_t.shape[0], 0))
-        out_discrete = utils.PlaceHolder(X=X_s, E=E_s, y=torch.zeros(y_t.shape[0], 0))
+        # Preserve graph-level conditioning throughout reverse diffusion.
+        out_one_hot = utils.PlaceHolder(X=X_s, E=E_s, y=y_t)
+        out_discrete = utils.PlaceHolder(X=X_s, E=E_s, y=y_t)
 
         return out_one_hot.mask(node_mask).type_as(y_t), out_discrete.mask(node_mask, collapse=True).type_as(y_t)
 

@@ -37,9 +37,28 @@ import networkx as nx
 from scipy.spatial import Delaunay
 
 
-def generate_planar_graph(n_nodes: int, rng: np.random.Generator,
-                          max_tries: int = 10) -> nx.Graph:
-    """Return one connected planar graph on exactly `n_nodes` nodes.
+def delaunay_graph(points: np.ndarray) -> nx.Graph:
+    """Build the undirected Delaunay graph for a 2D point array."""
+    points = np.asarray(points)
+    tri = Delaunay(points)
+    edges = set()
+    for simplex in tri.simplices:
+        a, b, c = int(simplex[0]), int(simplex[1]), int(simplex[2])
+        edges.add((min(a, b), max(a, b)))
+        edges.add((min(a, c), max(a, c)))
+        edges.add((min(b, c), max(b, c)))
+    graph = nx.Graph()
+    graph.add_nodes_from(range(points.shape[0]))
+    graph.add_edges_from(edges)
+    return graph
+
+
+def generate_planar_graph_and_positions(
+    n_nodes: int,
+    rng: np.random.Generator,
+    max_tries: int = 10,
+) -> tuple[nx.Graph, np.ndarray]:
+    """Return one connected planar graph and its generating 2D points.
 
     Sample `n_nodes` uniform points in the unit square and take the edges of
     their Delaunay triangulation. Retries on the (measure-zero) degenerate case
@@ -48,29 +67,25 @@ def generate_planar_graph(n_nodes: int, rng: np.random.Generator,
     for _ in range(max_tries):
         pts = rng.random((n_nodes, 2))
         try:
-            tri = Delaunay(pts)
+            G = delaunay_graph(pts)
         except Exception:
             continue  # collinear / coplanar input — resample
 
-        edges = set()
-        for simplex in tri.simplices:           # each simplex is a triangle (3 vertex ids)
-            a, b, c = int(simplex[0]), int(simplex[1]), int(simplex[2])
-            edges.add((min(a, b), max(a, b)))
-            edges.add((min(a, c), max(a, c)))
-            edges.add((min(b, c), max(b, c)))
-
-        G = nx.Graph()
-        G.add_nodes_from(range(n_nodes))
-        G.add_edges_from(edges)
-
         if G.number_of_nodes() == n_nodes and nx.is_connected(G) \
                 and nx.check_planarity(G)[0]:
-            return G
+            return G, pts
 
     raise RuntimeError(
         f"Failed to generate a connected planar graph on {n_nodes} nodes "
         f"after {max_tries} tries (degenerate point samples)."
     )
+
+
+def generate_planar_graph(n_nodes: int, rng: np.random.Generator,
+                          max_tries: int = 10) -> nx.Graph:
+    """Return one connected planar graph on exactly ``n_nodes`` nodes."""
+    graph, _ = generate_planar_graph_and_positions(n_nodes, rng, max_tries)
+    return graph
 
 
 def generate_split(n_graphs: int, n_nodes: int, rng: np.random.Generator,

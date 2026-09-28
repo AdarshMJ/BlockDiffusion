@@ -1320,23 +1320,40 @@ class CoarseGraphDataset(Dataset):
     never set on a present edge, so every present edge simply becomes class 1.
     """
 
-    def __init__(self, records, binary_edges: bool = False):
+    def __init__(self, records, binary_edges: bool = False,
+                 condition_on_n_orig: bool = False,
+                 size_condition_scale: float = 10000.0):
         self.records = records
         self.binary_edges = binary_edges
+        self.condition_on_n_orig = condition_on_n_orig
+        self.size_condition_scale = float(size_condition_scale)
+        if self.condition_on_n_orig and self.size_condition_scale <= 1:
+            raise ValueError("size_condition_scale must be greater than 1")
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, idx):
-        data = self.records[idx]['coarse']
-        if not self.binary_edges:
+        record = self.records[idx]
+        data = record['coarse']
+        if not self.binary_edges and not self.condition_on_n_orig:
             return data
-        # Fresh Data — never mutate the cached record in place.
-        edge_attr = torch.zeros(data.edge_attr.shape[0], 2, dtype=data.edge_attr.dtype)
-        edge_attr[:, 1] = 1.0
+        # Fresh Data — never mutate the cached record in place. The optional y
+        # is a fixed graph condition, not a prediction target.
+        if self.binary_edges:
+            edge_attr = torch.zeros(data.edge_attr.shape[0], 2, dtype=data.edge_attr.dtype)
+            edge_attr[:, 1] = 1.0
+        else:
+            edge_attr = data.edge_attr
+        if self.condition_on_n_orig:
+            n_orig = float(record['n_orig'])
+            value = np.log1p(n_orig) / np.log1p(self.size_condition_scale)
+            y = torch.tensor([[value]], dtype=data.x.dtype)
+        else:
+            y = data.y
         return torch_geometric.data.Data(
             x=data.x, edge_index=data.edge_index, edge_attr=edge_attr,
-            y=data.y, n_nodes=data.n_nodes,
+            y=y, n_nodes=data.n_nodes,
         )
 
 
@@ -1353,7 +1370,7 @@ class CoarseGraphDataModule(_SyntheticDataModuleBase):
     one command — no separate prebuild step needed.
 
     Config keys (under `coarsening:`):
-        planar_dir     : planar nx pickles dir   (default 'data/planar500')
+        graph_dir      : source nx pickles dir   (default 'data/planar500')
         cache_dir      : coarse cache root        (default 'data/coarse_planar')
         r, K, laplacian_kind, method : Loukas params
         force_rebuild  : ignore cache and recoarsen (default false)
@@ -1370,10 +1387,13 @@ class CoarseGraphDataModule(_SyntheticDataModuleBase):
             # Legacy: load a prebuilt cache directly from dataset.datadir.
             data_dir = os.path.join(base_path, cfg.dataset.datadir)
         else:
-            planar_dir = os.path.join(base_path, getattr(coars, 'planar_dir', 'data/planar500'))
+            graph_dir_value = getattr(
+                coars, 'graph_dir', getattr(coars, 'planar_dir', 'data/planar500')
+            )
+            graph_dir = os.path.join(base_path, graph_dir_value)
             cache_root = os.path.join(base_path, getattr(coars, 'cache_dir', 'data/coarse_planar'))
             data_dir = build_coarse_cache(
-                planar_dir, cache_root,
+                graph_dir, cache_root,
                 r=coars.r,
                 K=getattr(coars, 'K', 100),
                 laplacian_kind=getattr(coars, 'laplacian_kind', 'normalized_self_loop'),
@@ -1395,9 +1415,17 @@ class CoarseGraphDataModule(_SyntheticDataModuleBase):
         if binary_edges:
             print("  [CoarseGraph] binary_edges=True -> de=2 (weight classes collapsed)")
 
-        self.train_dataset = CoarseGraphDataset(_load('train'), binary_edges)
-        self.val_dataset = CoarseGraphDataset(_load('val'), binary_edges)
-        self.test_dataset = CoarseGraphDataset(_load('test'), binary_edges)
+        condition_on_n_orig = getattr(cfg.dataset, 'condition_on_n_orig', False)
+        size_condition_scale = getattr(cfg.dataset, 'size_condition_scale', 10000.0)
+        if condition_on_n_orig:
+            print(
+                "  [CoarseGraph] conditioning on requested original-node count "
+                f"(log scale capped at {size_condition_scale:g})"
+            )
+        dataset_args = (binary_edges, condition_on_n_orig, size_condition_scale)
+        self.train_dataset = CoarseGraphDataset(_load('train'), *dataset_args)
+        self.val_dataset = CoarseGraphDataset(_load('val'), *dataset_args)
+        self.test_dataset = CoarseGraphDataset(_load('test'), *dataset_args)
 
         self.batch_size = cfg.train.batch_size if 'debug' not in cfg.general.name else 2
         self.num_workers = getattr(cfg.train, 'num_workers', 0)
